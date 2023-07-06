@@ -114,7 +114,7 @@ func extractText(zipURL string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			b, err = japanese.ShiftJIS.NewDecorder().Bytes(b)
+			b, err = japanese.ShiftJIS.NewDecoder().Bytes(b)
 			if err != nil {
 				return "", err
 			}
