@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,12 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/ikawaha/kagome-dict/ipa"
+	"github.com/ikawaha/kagome/v2/tokenizer"
+	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/text/encoding/japanese"
 )
 
@@ -124,7 +129,76 @@ func extractText(zipURL string) (string, error) {
 	return "", errors.New("contents not found")
 }
 
+func setupDB(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS authors(author_id TEXT, author TEXT, PRIMARY KEY(author_id))`,
+		`CREATE TABLE IF NOT EXISTS contents(author_id TEXT, title_id TEXT, title TEXT, content TEXT, PRIMARY KEY (author_id, title_id))`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS contents_fts USING fts4(words)`,
+	}
+	for _, query := range queries {
+		_, err := db.Exec(query)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	return db, nil
+}
+
+func addEntry(db *sql.DB, entry *Entry, content string) error {
+	// authorsのREPLACE
+	_, err := db.Exec(`REPLACE INTO authors(author_id, author) values (?, ?)`,
+		entry.AuthorID,
+		entry.Author,
+	)
+	if err != nil {
+		return err
+	}
+
+	// contentsのREPLACE
+	res, err := db.Exec(`REPLACE INTO contents(author_id, title_id, title, content) values (?, ?, ?, ?)`,
+		entry.AuthorID,
+		entry.TitleID,
+		entry.Title,
+		content,
+	)
+	if err != nil {
+		return err
+	}
+	// 分かち書き処理
+	docID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	t, err := tokenizer.New(ipa.Dict(), tokenizer.OmitBosEos())
+	if err != nil {
+		return err
+	}
+
+	seg := t.Wakati(content)
+	// contents_ftsのREPLACE
+	_, err = db.Exec(`REPLACE INTO contents_fts(docid, words) values (?, ?)`,
+		docID,
+		strings.Join(seg, " "),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return nil
+}
+
 func main() {
+	db, err := setupDB("database.sqlite")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
 	listURL := "https://www.aozora.gr.jp/index_pages/person879.html"
 
 	entries, err := findEntries(listURL)
@@ -132,12 +206,17 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, entry := range entries {
+		log.Printf("adding %+v\n", entry)
 		content, err := extractText(entry.ZipURL)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
-		fmt.Println(entry.SiteURL)
-		fmt.Println(content)
+		err = addEntry(db, &entry, content)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		time.Sleep(time.Second * 3)
 	}
 }
